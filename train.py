@@ -1,8 +1,9 @@
+import json
 from argparse import ArgumentParser, Namespace
 
 import pandas as pd
 
-from src.data_process import prepare_train_valid_dataset
+from src.process import prepare_train_valid_dataset
 from src.learner import Learner
 from src.utils import save_report
 
@@ -15,9 +16,10 @@ def parse_arguments() -> Namespace:
         default="data/train.csv"
     )
     parser.add_argument(
-        "--model",
+        "--models",
         type=str,
-        default="xgboost"
+        default=["2step-xgboost"],
+        nargs="+",
     )
     return parser.parse_args()
 
@@ -26,11 +28,20 @@ if __name__ == "__main__":
     args = parse_arguments()
     df = pd.read_csv(args.data_path)
     X_train, X_valid, y_train, y_valid = prepare_train_valid_dataset(df)
-    learner = Learner(args.model)
-    results = learner.train(X_train, X_valid, y_train, y_valid)
+
+    evaluation_report = []
+    for model in args.models:
+        learner = Learner(model)
+        results = learner.train(X_train, X_valid, y_train, y_valid)
+        evaluation_report.append(
+            {
+                "model": model,
+                "param": json.dumps(learner.best_param),
+            } | results
+        )
+
     evaluation_report = {
-            "model": args.model,
-            **{k: [v] for k, v in results.items()}
+        k: [result[k] for result in evaluation_report]
+        for k in evaluation_report[0].keys()
     }
-    print(evaluation_report)
-    save_report(evaluation_report)
+    save_report(evaluation_report, "result/evaluation_report.csv")

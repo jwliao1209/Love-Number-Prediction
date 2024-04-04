@@ -50,6 +50,16 @@ class DataPipeline:
         return df
 
 
+def convert_df_to_X_and_y(
+        df: pd.DataFrame,
+        features: List[str]
+    ) -> Tuple[np.ndarray, np.ndarray]:
+
+    X = df[features].to_numpy()
+    y = df[TARGET_NAME].to_numpy().astype(np.float32)
+    return X, y
+
+
 def prepare_dataset(df: pd.DataFrame) -> pd.DataFrame:
     features = [
         "like_count_1h",
@@ -137,6 +147,27 @@ def prepare_train_valid_dataset(df: pd.DataFrame) -> pd.DataFrame:
         random_state=0,
     )
     return X_train, X_valid, y_train, y_valid
+
+
+def encode_category_features(
+    df: pd.DataFrame,
+    features: List[str],
+    target_name: str,
+    encoder,
+    is_train: bool,
+    ) -> pd.DataFrame:
+
+    df = df.copy()
+    encode_features = [f"{feature}_te" for feature in features]
+
+    for feature in features:
+        df[feature] = df[feature].astype("str")
+
+    if is_train:
+        df[encode_features] = encoder.fit_transform(df[features], df[target_name])
+    else:
+        df[encode_features] = encoder.transform(df[features])
+    return df
 
 
 def get_year(date: str) -> int:
@@ -264,34 +295,3 @@ def add_title_len(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["title_len"] = df["title"].apply(lambda x: len(x))
     return df
-
-
-def encode_category_features(
-    df: pd.DataFrame,
-    features: List[str],
-    target_name: str,
-    encoder,
-    is_train: bool,
-    ) -> pd.DataFrame:
-
-    df = df.copy()
-    encode_features = [f"{feature}_te" for feature in features]
-
-    for feature in features:
-        df[feature] = df[feature].astype("str")
-
-    if is_train:
-        df[encode_features] = encoder.fit_transform(df[features], df[target_name])
-    else:
-        df[encode_features] = encoder.transform(df[features])
-    return df
-
-
-def convert_df_to_X_and_y(
-        df: pd.DataFrame,
-        features: List[str]
-    ) -> Tuple[np.ndarray, np.ndarray]:
-
-    X = df[features].to_numpy()
-    y = df[TARGET_NAME].to_numpy()
-    return X, y

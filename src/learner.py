@@ -1,4 +1,4 @@
-from typing import Tuple
+import warnings
 
 import numpy as np
 from xgboost import XGBRegressor
@@ -6,8 +6,123 @@ from lightgbm import LGBMRegressor
 from catboost import CatBoostRegressor
 from sklearn.metrics import mean_absolute_percentage_error
 
-from src.constants import CATBOOST, LGBM, XGBOOST, TWO_STEP_MODEL
+from src.constants import (
+    CATBOOST,
+    LGBM,
+    XGBOOST,
+    ONE_STEP_CATBOOST,
+    ONE_STEP_LGBM,
+    ONE_STEP_XGBOOST,
+    TWO_STEP_CATBOOST,
+    TWO_STEP_LGBM,
+    TWO_STEP_XGBOOST,
+    MAPE,
+)
+from src.logger import logger
 from src.params import get_params_grids, PAEAMS_GRIDS
+from src.objective import squared_log_error_objective, SquaredLogErrorObjective
+
+
+warnings.simplefilter(action="ignore", category=UserWarning)
+
+
+class Learner:
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self.best_param = None
+
+    def train(self, X_train, X_valid, y_train, y_valid):
+        # grid serach
+        best_score = np.Inf
+        for param in get_params_grids(PAEAMS_GRIDS[self.model_name]):
+            model = init_estimator(self.model_name, param)
+
+            if self.model_name in [TWO_STEP_CATBOOST, TWO_STEP_LGBM, TWO_STEP_XGBOOST]:
+                model.fit(X_train, y_train, X_valid)
+            else:
+                model.fit(X_train, y_train)
+
+            y_pred = model.predict(X_train)
+            train_results = self.evaluate(y_train, y_pred, "train")
+
+            y_pred = model.predict(X_valid)
+            valid_results = self.evaluate(y_valid, y_pred, "valid")
+
+            results = train_results | valid_results
+            if best_score > results["valid_mape"]:
+                best_score = results["valid_mape"]
+                self.best_param = param
+                evaluation_results = train_results | valid_results
+
+            logger.info(param | results)
+
+        model = init_estimator(self.model_name, self.best_param)
+        if self.model_name in [TWO_STEP_CATBOOST, TWO_STEP_LGBM, TWO_STEP_XGBOOST]:
+            model.fit(X_train, y_train, X_valid)
+        else:
+            model.fit(X_train, y_train)
+
+        return evaluation_results
+
+    def evaluate(self, y_true, y_pred, prefix):
+        eval_fun = {
+            MAPE: mean_absolute_percentage_error,
+        }
+
+        results = {}
+        for name, f in eval_fun.items():
+            results[f"{prefix}_{name}"] = f(y_true, y_pred)
+        return results
+
+
+class BaseModel:
+    def label_transform(self, X, y):
+        return y - X[:, 5]
+
+    def inverse_label_transform(self, X, y):
+        return y + X[:, 5]
+    
+    def fit(self):
+        raise NotImplementedError
+    
+    def predict(self):
+        raise NotImplementedError
+
+
+class OneStepModel(BaseModel):
+    def __init__(self, estimator):
+        self.estimator = estimator
+
+    def fit(self, X, y):
+        y = self.label_transform(X, y)
+        self.estimator.fit(X, y)
+
+    def predict(self, X):
+        pred = self.estimator.predict(X)
+        return self.inverse_label_transform(X, pred)
+        
+
+class TwoStepModel(BaseModel):
+    def __init__(self, estimator1, estimator2):
+        self.estimator1 = estimator1
+        self.estimator2 = estimator2
+
+    def fit(self, X_train, y_train, X_valid):
+        y_train = self.label_transform(X_train, y_train)
+
+        # step 1: train the model to predict the pseudo labels
+        self.estimator1.fit(X_train, y_train)
+        y_pseudo = self.estimator1.predict(X_valid)
+        y_pseudo[y_pseudo < 0] = 0  # convert the nagative prediction to positive
+
+        # step 2: combine the train and valid and train the model
+        X = np.vstack([X_train, X_valid])
+        y = np.hstack([y_train, y_pseudo])
+        self.estimator2.fit(X, y)
+
+    def predict(self, X):
+        pred = self.estimator2.predict(X)
+        return self.inverse_label_transform(X, pred)
 
 
 def init_estimator(estimator_name: str, param: dict):
@@ -15,7 +130,7 @@ def init_estimator(estimator_name: str, param: dict):
         estimator = XGBRegressor(
             **param,
             objective="reg:squaredlogerror",
-            random_state=250,
+            random_state=0,
             eval_metric=mean_absolute_percentage_error,
         )
 
@@ -33,127 +148,42 @@ def init_estimator(estimator_name: str, param: dict):
             **param,
             objective=SquaredLogErrorObjective(),
             eval_metric="MAPE",
-            random_state=0,
-            verbose=-1,
+            allow_writing_files=False,
+            random_state=250,
+            verbose=0,
+        )
+
+    elif estimator_name == ONE_STEP_XGBOOST:
+        estimator = OneStepModel(
+            init_estimator(XGBOOST, param),
         )
     
-    elif estimator_name == TWO_STEP_MODEL:
+    elif estimator_name == ONE_STEP_LGBM:
+        estimator = OneStepModel(
+            init_estimator(LGBM, param),
+        )
+    
+    elif estimator_name == ONE_STEP_CATBOOST:
+        estimator = OneStepModel(
+            init_estimator(CATBOOST, param),
+        )
+
+    elif estimator_name == TWO_STEP_XGBOOST:
         estimator = TwoStepModel(
             init_estimator(XGBOOST, param),
             init_estimator(XGBOOST, param),
         )
+    
+    elif estimator_name == TWO_STEP_LGBM:
+        estimator = TwoStepModel(
+            init_estimator(LGBM, param),
+            init_estimator(LGBM, param),
+        )
+    
+    elif estimator_name == TWO_STEP_CATBOOST:
+        estimator = TwoStepModel(
+            init_estimator(CATBOOST, param),
+            init_estimator(CATBOOST, param),
+        )
+
     return estimator
-
-
-def compute_squared_log_error_grad(
-        y_true: np.array,
-        y_pred: np.array,
-        epsilon: float = 1e-6,
-    ) -> np.array:
-    """
-    grad = (log(y_pred+1) - log(y_true+1)) / (y_pred + 1)
-    """
-    y_pred[y_pred < -1] = -1 + epsilon
-    return  (np.log1p(y_pred) - np.log1p(y_true)) / (y_pred + 1)
-
-
-def compute_squared_log_error_hess(
-        y_true: np.array,
-        y_pred: np.array,
-    ) -> np.array:
-    """
-    hess = (-log(y_pred+1) + log(y_true+1) + 1) / (y_pred + 1)^2
-    """
-    epsilon = 1e-6
-    y_pred[y_pred < -1] = -1 + epsilon
-    return  (-np.log1p(y_pred) + np.log1p(y_true) + 1) / (y_pred + 1) ** 2
-
-
-def squared_log_error_objective(
-        y_true: np.array,
-        y_pred: np.array,
-    ) -> Tuple[np.array, np.array]:
-    """
-    squared_log_error = 0.5 * (log(y_pred+1) - log(y_true+1)) ** 2
-    """
-    epsilon = 1e-6
-    grad = compute_squared_log_error_grad(y_true, y_pred, epsilon)
-    hess = compute_squared_log_error_hess(y_true, y_pred, epsilon)
-    return grad, hess
-
-
-class SquaredLogErrorObjective:
-    def calc_ders_range(
-            self,
-            approxes: np.array,
-            targets: np.array,
-            weights: np.array
-        ):
-        weights = weights if weights is not None else np.ones(len(targets))
-        epsilon = 1e-6
-        grad = compute_squared_log_error_grad(targets, approxes, epsilon)
-        hess = compute_squared_log_error_hess(targets, approxes, epsilon)
-        return list(zip(grad * weights, hess * weights))
-
-
-class TwoStepModel:
-    def __init__(self, estimator1, estimator2):
-        self.estimator1 = estimator1
-        self.estimator2 = estimator2
-    
-    def label_transform(self, X, y):
-        return y - X[:, 5]
-    
-    def inverse_label_transform(self, X, y):
-        return y + X[:, 5]
-
-    def fit(self, X_train, y_train, X_valid):
-        y_train = self.label_transform(X_train, y_train)
-
-        # step 1: train the model to predict the pseudo labels
-        self.estimator1.fit(X_train, y_train)
-        y_pseudo = self.estimator1.predict(X_valid)
-
-        # step 2: combine the train and valid and train the model
-        X = np.vstack([X_train, X_valid])
-        y = np.hstack([y_train, y_pseudo])
-        self.estimator2.fit(X, y)
-
-    def predict(self, X):
-        pred = self.estimator2.predict(X)
-        return self.inverse_label_transform(X, pred)
-
-
-class Learner:
-    def __init__(self, model_name):
-        self.model_name = model_name
-
-    def train(self, X_train, X_valid, y_train, y_valid):
-        evaluation_results = {}
-        for param in get_params_grids(PAEAMS_GRIDS[self.model_name]):
-            model = init_estimator(self.model_name, param)
-
-            if self.model_name == TWO_STEP_MODEL:
-                model.fit(X_train, y_train, X_valid)
-            else:
-                model.fit(X_train, y_train)
-
-            y_pred = model.predict(X_train)
-            train_results = self.evaluate(y_train, y_pred, "train")
-
-            y_pred = model.predict(X_valid)
-            valid_results = self.evaluate(y_valid, y_pred, "valid")
-
-            results = train_results | valid_results
-
-        return results
-
-    def evaluate(self, y_true, y_pred, prefix):
-        eval_fun = {
-            "mean_absolute_percentage_error": mean_absolute_percentage_error,
-        }
-
-        results = {}
-        for name, f in eval_fun.items():
-            results[f"{prefix}_{name}"] = f(y_true, y_pred)
-        return results
