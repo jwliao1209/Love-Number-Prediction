@@ -1,4 +1,4 @@
-# Dcard-Love-Prediction
+# Love-Number-Prediction
 
 ## Setup
 ```
