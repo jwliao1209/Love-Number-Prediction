@@ -45,7 +45,8 @@ class SquaredLogErrorObjective:
             approxes: np.array,
             targets: np.array,
             weights: np.array
-    ) -> List[Tuple[np.array, np.array]]:
+        ) -> List[Tuple[np.array, np.array]]:
+
         weights = weights if weights is not None else np.ones(len(targets))
         epsilon = 1e-6
         grad = compute_squared_log_error_grad(targets, approxes, epsilon)
